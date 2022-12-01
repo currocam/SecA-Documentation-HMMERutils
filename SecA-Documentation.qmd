@@ -1,0 +1,178 @@
+---
+title: "Analysing SecA protein using HMMERutils"
+author: 
+  - "Curro Campuzano Jiménez" 
+  - "Juan Emilio ..."
+  - "Coral del Val Muñon"
+toc: True
+bibliography: references.bib
+format:
+  html:
+    self-contained: true
+    self-contained-math: true
+reference-location: margin
+---
+
+## Brief introduction to HMMER
+
+The search for homologous sequences is one of the most informative analyses of protein sequences and one of the most widely used tools in bioinformatics. Two or more sequences are homologous when they share a common evolutionary ancestry, and we infer homology when we observe an excess of similarity compared to what would be expected by chance [see @pearson].
+
+However, distant homologous sequences do not necessarily share significant sequence similarity [@pearson]. [HMMER](http://hmmer.org/) is a fast and extremely sensitive program for detecting distant relationships and identifying fragments of sequences. It is based in probabilistic models called profile hidden Markov models and it is available as a command line tool and at the [European Bioinformatics Institute's servers](https://www.ebi.ac.uk/Tools/hmmer/) [see @Finn2011].
+
+[HMMERutils](https://currocam.github.io/HMMERutils/) provides a comprehensive approach to analyse HMMER output and a convenient interface to interact the HMMER web server using R and [Tidyverse](https://www.tidyverse.org/) (a collection of widely used packages that share an underlying design philosophy that is followed in this library).
+
+## Brief introduction to SecA protein (our example application)
+
+SecA is the ATPase motor protein of the Sec system. This translocase is involved in the secretion of most part of the bacterial secretory proteins and it is under study due to its importance. Being a large protein, composed of several domains and highly conserved during evolution, it is a perfect example to explore the benefits of the library `HMMERutils` [see @Ambroziak2021].
+
+## Analyzing SecA homologous sequences using `HMMERutils`
+
+### Required packages
+
+`HMMERutils` utils relies on other Open Source libraries for its operation, which are therefore necessary for its functioning. These libraries are the following:
+
+-   [Biostrings](https://bioconductor.org/packages/release/bioc/html/Biostrings.html): to manipulate efficiently fasta sequences.
+
+-   [Tidyverse](https://www.tidyverse.org/): to filter, sort and visualize the information obtained.
+
+To install the previous packages as well as HMMERutils from GitHub, you can run the following chunk of code:
+
+```{r}
+#|label: required-packages
+#|eval: false
+if (!require("BiocManager")) install.packages("BiocManager")
+if (!require("remotes")) BiocManager::install("remotes")
+if (!require("HMMERutils")) BiocManager::install(
+  c("currocam/HMMERutils", "Peptides")
+  )
+
+```
+
+and load the libraries by executing the below chunk.
+
+```{r}
+#| label: setup
+#| message: false
+#| warning: false
+library(HMMERutils)
+library(Biostrings)
+library(ggplot2)
+library(dplyr)
+library(tidyselect)
+library(tidyr)
+
+```
+
+## Reference sequence
+
+First, we need a reference protein sequence with which to search for SecA homologous sequences. We will use the *E. coli* SecA sequence. We can retrieve it from public databases such us [UniProt](https://www.uniprot.org/uniprotkb/P10408/entry) using its identifier, P10408. Let's use the `readAAStringSet` function to read the fasta sequence directly into R from UniProt [^1].
+
+[^1]: If you are not familiar with R, you may find the syntax peculiar. It is not unique to this library, but a common practice in R. The `<-`is used to assign to a variable and the pipe operator, `%>%` is used to pass the result of applying a function as the first argument to the next one. Also, we put in parentheses the whole expression to call the display method in addition to assigning it.
+
+```{r}
+#| label: read-fasta 
+(
+  SecA.fasta <- "https://rest.uniprot.org/uniprotkb/P10408.fasta" %>%
+  readAAStringSet()
+)
+```
+
+#### Parsing fasta header
+
+The sequence headers in Uniprot and most databases contain not only the sequence identifier, but also information related to the sequence. We can directly parse the header using the `parse_FASTA_sequence_identifiers` function of the HMMERutils library [^2].
+
+[^2]: The function recognizes the different formats defined in the NCBI FASTA format for sequence identifiers, which can be consulted [here](https://ncbi.github.io/cxx-toolkit/pages/ch_demo#ch_demo.id1_fetch.html_ref_fasta).
+
+```{r}
+#| label: fasta-header
+(
+names(SecA.fasta) <- names(SecA.fasta) %>%
+  parse_fasta_headers()
+)
+```
+
+## Homologous sequences
+
+### Searching for homologous sequences using phmmer
+
+We can now search for sequences homologous to the SecA sequence. The appropriate program for this is [phmmer](https://www.ebi.ac.uk/Tools/hmmer/search/phmmer), which allows us to query a protein sequence against a protein sequence database. In our case, the sequences of interest are **SwissProt** and **Ensembl**[^3].
+
+[^3]: Currently available databases include Reference Proteomes, UniProtKB, SwissProt, PDB, AlphaFold and Ensembl, among others.
+
+By executing the following code block, we will be launching a request to the HMMER server to search for homologous sequences to our target sequence (or vector of target sequences) against each of the indicated databases, extract such information in a long and tidy table, download the corresponding fasta sequences, taxonomically annotate the sequences (either using a local or remote database) and calculate a series of theoretical physicochemical indexes on protein properties.
+
+```{r}
+#| label: phmmer
+HMMER_data <- SecA.fasta %>%
+  search_phmmer(seqdb = c("swissprot", "ensembl")) %>%
+  add_sequences_to_hmmer_tbl() %>%
+  add_taxa_to_hmmer_tbl(mode = "local") %>%
+  add_physicochemical_properties_to_HMMER_tbl()
+```
+
+### Filtering redundant sequences
+
+For now, we are going to exclude those sequences that have the same sequence and tax id:
+
+```{r}
+HMMER_data <- HMMER_data %>%
+  distinct(hits.fullfasta, hits.taxid, .keep_all = TRUE) %>%
+  drop_na(hits.fullfasta)
+  
+  
+dim(HMMER_data)
+```
+
+### Filtering sequences by expected value
+
+First, we'll begin by studying the e-values obtained. There are several types of e-values, some referring to the sequence and others referring to the domains.
+
+It is of special interest to study carefully the domain `E-value` when it happens that, although the full sequence `E-value` is good, none of the domain `E-value` reaches the significance threshold. In that case, what is happening is that those weak hits, none of which is good enough on its own, add up to raise the sequence to a high score. This may happen because the sequence contains several weak homologous domains, or it may contain a repetitive sequence that is hitting by chance.
+
+Let visualize the distribution of E-values of the significant hits:
+
+```{r}
+#|label: fig-evalue
+#| fig-cap: 
+#|   - "HMMER Cleveland plot. In this plot, the −log(E−value) is represented on the x axis, and on the y axis each of the identified sequences is represented one at a time. The green dots represent the E-values of the full sequence and the red dots the E-values of each of the domains."
+
+HMMER_data %>%
+  filter_hmmer(threshold = 0.001) %>%
+  hmmer_evalues_cleveland_dot_plot(threshold = 0.001)
+```
+
+As it is shown in @fig-evalue, there are some non-significant E-values for some domains. This is a red-flag. Let inspect those hits
+
+```{r}
+domains <- HMMER_data %>%
+  extract_from_hmmer()
+red.flags <- domains %>%
+  filter(domains.ievalue > 0.001)
+```
+
+```{r}
+red.flags <- red.flags %>%
+  mutate(domains.length = domains.alisqto - domains.alisqfrom)
+summary(red.flags$domains.length)
+```
+
+We are going to exclude those
+
+```{r}
+library(stringr)
+long.red.flags <- red.flags %>%
+  filter(domains.length > quantile(red.flags$domains.length, 0.75))
+long.red.flags$hits.fullfasta %>%
+  str_sub(long.red.flags$domains.alisqfrom, long.red.flags$domains.alisqto)
+
+```
+
+```{r}
+HMMER_data <- filter_hmmer(HMMER_data) %>%
+  add_taxa_to_hmmer_tbl(mode = "local")
+
+
+```
+
+## Taxonomic distribution
+
